@@ -1,0 +1,34 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+fasm/
+dist/
+out/
+
+# Compiled binaries
+*.bin
+*.o
+*.obj
+*.exe
+*.elf
+
+# IDE
+.vscode/
+.idea/
+
+# OS garbage
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
