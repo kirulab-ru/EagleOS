@@ -9,10 +9,12 @@ venv/
 env/
 
 # Build artifacts
-build/
 fasm/
 dist/
-out/
+/build/*
+!/build/.gitkeep
+!/tools/.gitkeep
+
 
 # Compiled binaries
 *.bin
@@ -32,3 +34,4 @@ desktop.ini
 
 # Logs
 *.log
+*.err
