@@ -61,80 +61,226 @@ def run_tool(command: list[str], *, cwd: Path = ROOT) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build EagleOS and optionally launch it in QEMU.")
-    parser.add_argument("--no-run", action="store_true", help="build the floppy image without launching QEMU")
-    parser.add_argument("--clean", action="store_true", help="remove generated build files before building")
+    parser = argparse.ArgumentParser(
+        description="Build EagleOS and optionally launch it in QEMU."
+    )
+    parser.add_argument(
+        "--no-run",
+        action="store_true",
+        help="build the floppy image without launching QEMU"
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="remove generated build files before building"
+    )
     args = parser.parse_args()
 
-    if args.clean and BUILD.exists(): shutil.rmtree(BUILD)
+    if args.clean and BUILD.exists():
+        shutil.rmtree(BUILD)
+
     BUILD.mkdir(parents=True, exist_ok=True)
 
+    # All project paths
+    kernel_src = ROOT / "src" / "kernel"
+    build_obj = BUILD / "obj"
+
+    build_obj.mkdir(parents=True, exist_ok=True)
+
+    # Find tools
     wdirs = watcom_dirs()
-    fasm = find_executable("fasm", "FASM_EXE", [ROOT / "tools" / "fasm"])
+
+    fasm = find_executable(
+        "fasm", "FASM_EXE", [ROOT / "tools" / "fasm"]
+    )
     wcc = find_executable("wcc", "WCC_EXE", wdirs)
     wasm = find_executable("wasm", "WASM_EXE", wdirs)
     wlink = find_executable("wlink", "WLINK_EXE", wdirs)
 
-    # Compile C for 8086, 16-bit small model.
-    run_tool([wcc, "-0", "-ms", "-s", "-zl",f"-fo={BUILD / 'main.obj'}",str(ROOT / "src" / "kernel" / "main.c"),])
+    # Find all C source files recursively
+    c_sources = sorted(kernel_src.rglob("*.c"))
 
-    run_tool([wasm, "-0", "-mt",f"-fo={BUILD / 'entry.obj'}",str(ROOT / "src" / "kernel" / "entry.asm"),])
+    if not c_sources:
+        raise FileNotFoundError(
+            f"No C source files found in {kernel_src}"
+        )
+
+    print(f"\nFound {len(c_sources)} C source files.")
+
+    object_files = []
+    watcom_root = Path(
+        os.environ.get("WATCOM", r"C:\WATCOM")
+    )
+
+    watcom_include = watcom_root / "h"
+
+    if not (watcom_include / "i86.h").is_file():
+        raise FileNotFoundError(
+            f"Open Watcom header not found: {watcom_include / 'i86.h'}"
+        )
+    # Compile every C source file
+    for source in c_sources:
+        relative = source.relative_to(kernel_src)
+
+        # Preserve directory structure to avoid filename collisions
+        obj_path = build_obj / relative.with_suffix(".obj")
+        obj_path.parent.mkdir(parents=True, exist_ok=True)
+
+        print(f"\nCompiling: {relative}")
+
+        run_tool([
+            wcc,
+            "-0",
+            "-ms",
+            "-s",
+            "-zl",
+           f"-i={watcom_include}",
+            f"-fo={obj_path}",
+            str(source),
+        ])
+
+        object_files.append(obj_path)
+
+    # Compile assembly entry point
+    entry_asm = kernel_src / "entry.asm"
+    entry_obj = BUILD / "entry.obj"
+
+    if not entry_asm.is_file():
+        raise FileNotFoundError(f"Missing entry point: {entry_asm}")
+
+    print("\nCompiling kernel entry...")
+
+    run_tool([
+        wasm,
+        "-0",
+        "-mt",
+        f"-fo={entry_obj}",
+        str(entry_asm),
+    ])
+
+    # Generate linker script
     linker_script = BUILD / "kernel.lnk"
+
+    linker_lines = [
+        "format dos com",
+        "option start=_cs_",
+        "option nodefaultlibs",
+        "option map=build\\kernel.map",
+        "name build\\kernel.com",
+        "file build\\entry.obj",
+    ]
+
+    for obj in object_files:
+        relative_obj = obj.relative_to(ROOT)
+        linker_lines.append(f"file {relative_obj}")
+
     linker_script.write_text(
-        "format dos com\n"
-        "option start=_cs_\n"
-        "option nodefaultlibs\n"
-        "option map=build\\kernel.map\n"
-        "name build\\kernel.com\n"
-        "file build\\entry.obj, build\\main.obj\n",
+        "\n".join(linker_lines) + "\n",
         encoding="ascii",
     )
-    run_tool([wlink, "@build\\kernel.lnk"])
 
+    print("\nLinking kernel...")
+
+    run_tool([
+        wlink,
+        f"@{linker_script.relative_to(ROOT)}"
+    ])
+
+    # Validate kernel output
     kernel_path = BUILD / "kernel.com"
+
     if not kernel_path.is_file():
-        raise FileNotFoundError("WLINK completed but build/kernel.com was not created.")
+        raise FileNotFoundError(
+            "WLINK completed but build/kernel.com was not created."
+        )
 
     kernel = kernel_path.read_bytes()
+
     if not kernel:
         raise RuntimeError("The linked kernel is empty.")
+
     if len(kernel) > MAX_KERNEL_BYTES:
         raise RuntimeError(
-            f"Kernel is {len(kernel)} bytes; maximum for this starter is "
-            f"{MAX_KERNEL_BYTES} bytes so the 16-bit stack has room."
+            f"Kernel is {len(kernel)} bytes; maximum for this "
+            f"starter is {MAX_KERNEL_BYTES} bytes."
         )
 
     sectors = math.ceil(len(kernel) / SECTOR_SIZE)
+
     if sectors > (80 * 2 * 18 - 1):
-        raise RuntimeError("Kernel exceeds the capacity of a 1.44 MB floppy image.")
+        raise RuntimeError(
+            "Kernel exceeds the capacity of a 1.44 MB floppy image."
+        )
 
-    (BUILD / "kernel_size.inc").write_text(f"KERNEL_SECTORS = {sectors}\n", encoding="ascii")
+    # Generate bootloader sector count include
+    (BUILD / "kernel_size.inc").write_text(
+        f"KERNEL_SECTORS = {sectors}\n",
+        encoding="ascii",
+    )
 
+    # Assemble boot sector
+    boot_asm = ROOT / "src" / "boot" / "boot.asm"
     boot_bin = BUILD / "boot.bin"
-    run_tool([fasm,str(ROOT / "src"/"boot" / "boot.asm"),str(boot_bin),])
+
+    print("\nAssembling bootloader...")
+
+    run_tool([
+        fasm,
+        str(boot_asm),
+        str(boot_bin),
+    ])
 
     boot = boot_bin.read_bytes()
-    if len(boot) != SECTOR_SIZE:
-        raise RuntimeError(f"Boot sector must be exactly 512 bytes; got {len(boot)}.")
-    if boot[510:512] != b"\x55\xAA":
-        raise RuntimeError("Boot sector is missing the 55 AA boot signature.")
 
+    if len(boot) != SECTOR_SIZE:
+        raise RuntimeError(
+            f"Boot sector must be exactly 512 bytes; got {len(boot)}."
+        )
+
+    if boot[510:512] != b"\x55\xAA":
+        raise RuntimeError(
+            "Boot sector is missing the 55 AA boot signature."
+        )
+
+    # Create floppy image
     image = bytearray(FLOPPY_BYTES)
+
     image[0:SECTOR_SIZE] = boot
     image[SECTOR_SIZE:SECTOR_SIZE + len(kernel)] = kernel
+
     image_path = BUILD / "eagleos.img"
     image_path.write_bytes(image)
 
-    print(f"\nBuild successful: {image_path}")
-    print(f"Kernel: {len(kernel)} bytes ({sectors} sectors), loaded at 0800:0100")
+    print("\nBuild successful!")
+    print(f"Image: {image_path}")
+    print(f"Kernel: {len(kernel)} bytes")
+    print(f"Sectors: {sectors}")
+    print(f"Loaded at: 0800:0100")
+    print(f"C modules: {len(c_sources)}")
 
     if args.no_run:
         return 0
 
-    qemu = find_executable("qemu-system-i386", "QEMU_EXE", [Path("C:/Program Files/qemu"), Path("C:/Program Files/QEMU")])
+    # Launch QEMU
+    qemu = find_executable(
+        "qemu-system-i386",
+        "QEMU_EXE",
+        [
+            Path("C:/Program Files/qemu"),
+            Path("C:/Program Files/QEMU"),
+        ],
+    )
 
-    run_tool([qemu,"-machine", "pc","-m", "16M","-drive", f"file={image_path},format=raw,if=floppy","-boot", "a",])
+    run_tool([
+        qemu,
+        "-machine", "pc",
+        "-m", "16M",
+        "-drive", f"file={image_path},format=raw,if=floppy",
+        "-boot", "a",
+    ])
+
     return 0
+
 
 
 if __name__ == "__main__":

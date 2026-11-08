@@ -18,6 +18,17 @@ _cs_:
     cld
     sti
 
+    ; Disable cursor before kernel loaded
+    mov dx, 03D4h
+    mov al, 0Ah
+    out dx, al
+
+    inc dx
+    in al, dx
+
+    or al, 20h
+    out dx, al
+
     call kmain_
 
 khalt:

@@ -1,8 +1,3 @@
-; ===== [EagleOS Boot KERNELer] =====
-; 
-;
-;
-
 use16
 org 0x7C00
 
